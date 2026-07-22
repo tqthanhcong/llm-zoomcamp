@@ -2,7 +2,7 @@ services:
   rag-assistant:
     build: .
     ports:
-      - "8501:8501"
+      - "${HOST_PORT:-8501}:8501"
     environment:
       HF_HOME: /app/.cache/huggingface
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

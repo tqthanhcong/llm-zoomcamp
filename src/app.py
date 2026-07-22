@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import time
 import uuid
@@ -39,10 +40,22 @@ def get_connection() -> sqlite3.Connection:
             latency_ms REAL NOT NULL,
             token_count INTEGER NOT NULL,
             rerank_score REAL NOT NULL,
+            retrieval_method TEXT NOT NULL DEFAULT 'hybrid',
+            score_label TEXT NOT NULL DEFAULT 'CrossEncoder score',
             feedback INTEGER
         )
         """
     )
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(interactions)").fetchall()}
+    if "retrieval_method" not in columns:
+        connection.execute(
+            "ALTER TABLE interactions ADD COLUMN retrieval_method TEXT NOT NULL DEFAULT 'hybrid'"
+        )
+    if "score_label" not in columns:
+        connection.execute(
+            "ALTER TABLE interactions ADD COLUMN score_label "
+            "TEXT NOT NULL DEFAULT 'CrossEncoder score'"
+        )
     connection.commit()
     return connection
 
@@ -56,14 +69,16 @@ def record_interaction(
     latency_ms: float,
     token_count: int,
     rerank_score: float,
+    retrieval_method: str,
+    score_label: str,
 ) -> None:
     with get_connection() as connection:
         connection.execute(
             """
             INSERT INTO interactions (
                 response_id, created_at, query, rewritten_query, answer, sources,
-                latency_ms, token_count, rerank_score
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                latency_ms, token_count, rerank_score, retrieval_method, score_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 response_id,
@@ -75,6 +90,8 @@ def record_interaction(
                 latency_ms,
                 token_count,
                 rerank_score,
+                retrieval_method,
+                score_label,
             ),
         )
 
@@ -93,14 +110,15 @@ def get_retriever() -> AdvancedRetriever:
     return AdvancedRetriever(KNOWLEDGE_DB)
 
 
-def run_query(query: str) -> dict[str, object]:
+def run_query(query: str, method: str = "bm25") -> dict[str, object]:
     started = time.perf_counter()
-    rewritten, contexts = get_retriever().search(query)
+    rewritten, contexts = get_retriever().search(query, method=method)  # type: ignore[arg-type]
     answer, token_count = answer_question(query, contexts)
     latency_ms = (time.perf_counter() - started) * 1000
     response_id = str(uuid.uuid4())
     sources = " | ".join(f"{item.filename}#{item.chunk_id}" for item in contexts)
     best_score = max((item.score for item in contexts), default=0.0)
+    score_label = "BM25 score" if method == "bm25" else "CrossEncoder score"
     record_interaction(
         response_id,
         query,
@@ -110,12 +128,16 @@ def run_query(query: str) -> dict[str, object]:
         latency_ms,
         token_count,
         best_score,
+        method,
+        score_label,
     )
     return {
         "response_id": response_id,
         "query": query,
         "answer": answer,
         "contexts": contexts,
+        "method": method,
+        "score_label": score_label,
     }
 
 
@@ -134,6 +156,25 @@ def render_chat() -> None:
     st.caption(
         "Questions may be in Vietnamese or English; answers are returned in English with citations."
     )
+    mode_label = st.selectbox(
+        "Retrieval mode",
+        ("Fast — BM25", "Advanced — Hybrid + reranker"),
+        help=(
+            "Fast mode uses local keyword search immediately. Advanced mode downloads Hugging Face "
+            "models on first use and can take several minutes."
+        ),
+    )
+    method = "bm25" if mode_label == "Fast — BM25" else "hybrid"
+    if method == "bm25":
+        st.caption("Fast mode uses BM25 only; no Hugging Face model download is required.")
+    else:
+        st.info(
+            "Advanced mode loads MiniLM and a CrossEncoder. The first run can take several minutes."
+        )
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        st.caption(
+            "No DeepSeek key is configured, so answers will use cited extracts from retrieved text."
+        )
     button_columns = st.columns(3)
     selected_query = None
     for index, sample in enumerate(SAMPLE_QUERIES):
@@ -150,7 +191,7 @@ def render_chat() -> None:
                     for context in message["contexts"]:
                         st.markdown(
                             f"**{context.filename} — {context.chunk_id}** "
-                            f"(score {context.score:.3f})"
+                            f"({message['score_label']} {context.score:.3f})"
                         )
                         st.write(context.content)
                 render_feedback(message["response_id"])
@@ -158,14 +199,22 @@ def render_chat() -> None:
     query = selected_query or st.chat_input("Ask a macroeconomic or policy question")
     if query:
         st.session_state.messages.append({"role": "user", "content": query})
-        with st.spinner("Searching and grounding the answer..."):
-            result = run_query(query)
+        with st.status("Processing question...", expanded=True) as status:
+            st.write("Loading the retrieval index...")
+            if method == "hybrid":
+                st.write("Loading models, retrieving documents, and reranking passages...")
+            else:
+                st.write("Retrieving documents with BM25...")
+            result = run_query(query, method)
+            st.write("Generating an answer or preparing cited extracts...")
+            status.update(label="Answer ready", state="complete", expanded=False)
         st.session_state.messages.append(
             {
                 "role": "assistant",
                 "content": result["answer"],
                 "contexts": result["contexts"],
                 "response_id": result["response_id"],
+                "score_label": result["score_label"],
             }
         )
         st.rerun()
@@ -230,14 +279,15 @@ def render_dashboard() -> None:
     )
     st.altair_chart(tokens, use_container_width=True)
 
-    st.markdown("#### 5. Context Similarity / Re-ranking Score Distribution")
+    st.markdown("#### 5. Retrieval Score Distribution")
     histogram = (
         alt.Chart(frame)
         .mark_bar()
         .encode(
-            x=alt.X("rerank_score:Q", bin=alt.Bin(maxbins=20), title="CrossEncoder score"),
+            x=alt.X("rerank_score:Q", bin=alt.Bin(maxbins=20), title="Retrieval score"),
             y=alt.Y("count():Q", title="Requests"),
-            tooltip=[alt.Tooltip("count():Q", title="Requests")],
+            color=alt.Color("score_label:N", title="Score type"),
+            tooltip=[alt.Tooltip("count():Q", title="Requests"), "score_label:N"],
         )
     )
     st.altair_chart(histogram, use_container_width=True)
