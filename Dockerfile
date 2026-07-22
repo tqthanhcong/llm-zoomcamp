@@ -4,6 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH=/app \
     HF_HOME=/app/.cache/huggingface
 
 WORKDIR /app
