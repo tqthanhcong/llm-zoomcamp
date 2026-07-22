@@ -19,6 +19,23 @@ load_dotenv()
 DEFAULT_DB_PATH = Path("data/knowledge.duckdb")
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+
+def get_deepseek_client() -> OpenAI:
+    """Create an OpenAI-compatible client configured for DeepSeek."""
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY is not configured")
+    return OpenAI(
+        api_key=api_key,
+        base_url=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+    )
+
+
+def chat_completion(client: OpenAI, model: str, messages: list[dict[str, str]]):
+    """Request a deterministic chat completion through DeepSeek's compatible API."""
+    return client.chat.completions.create(model=model, messages=messages, temperature=0)
 
 
 def tokenize(text: str) -> list[str]:
@@ -92,13 +109,13 @@ class AdvancedRetriever:
         clean_query = " ".join(query.split())
         if not clean_query:
             raise ValueError("Query must not be empty")
-        if not os.getenv("OPENAI_API_KEY"):
+        if not os.getenv("DEEPSEEK_API_KEY"):
             return clean_query
 
-        client = OpenAI()
-        response = client.responses.create(
-            model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
-            input=[
+        response = chat_completion(
+            get_deepseek_client(),
+            os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+            [
                 {
                     "role": "system",
                     "content": (
@@ -112,7 +129,7 @@ class AdvancedRetriever:
             ],
             temperature=0,
         )
-        return response.output_text.strip() or clean_query
+        return (response.choices[0].message.content or "").strip() or clean_query
 
     def bm25_search(self, query: str, limit: int = 10) -> list[tuple[str, float]]:
         scores = self._bm25.get_scores(tokenize(query))
@@ -240,22 +257,23 @@ def answer_question(
             "Do not reveal private reasoning; provide a concise evidence-backed conclusion."
         )
 
-    if not os.getenv("OPENAI_API_KEY"):
+    if not os.getenv("DEEPSEEK_API_KEY"):
         sources = ", ".join(f"[Source {i}]" for i in range(1, len(contexts) + 1))
         fallback = (
-            "Retrieval succeeded, but generation requires OPENAI_API_KEY. "
+            "Retrieval succeeded, but generation requires DEEPSEEK_API_KEY. "
             f"The most relevant evidence is available in {sources}."
         )
         return fallback, max(1, len((query + context_text).split()))
 
-    response = OpenAI().responses.create(
-        model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
-        input=[
+    response = chat_completion(
+        get_deepseek_client(),
+        os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+        [
             {"role": "system", "content": system},
             {"role": "user", "content": f"Question: {query}\n\nEvidence:\n{context_text}"},
         ],
         temperature=0,
     )
-    usage = getattr(response, "usage", None)
+    usage = response.usage
     total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-    return response.output_text.strip(), total_tokens
+    return (response.choices[0].message.content or "").strip(), total_tokens
