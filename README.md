@@ -33,11 +33,12 @@ The ingestion job uses `dlt`, a recursive character splitter (`chunk_size=1000`,
 
 ```bash
 cp .env.example .env
-# Set DEEPSEEK_API_KEY in .env for rewriting and answer generation.
 docker compose up --build
 ```
 
-Docker Engine with the Compose plugin is required. Open [http://localhost:8501](http://localhost:8501). The container ingests the sample documents before starting Streamlit. Without an API key, retrieval and the monitoring interface still work, and the answer panel explains that generation is disabled.
+Docker Engine with the Compose plugin is required. Open [http://localhost:8501](http://localhost:8501), select **Fast — BM25**, and ask a sample question. This fastest path needs no API key or model download: it returns cited extracts from the local sample documents. The container ingests the sample documents before starting Streamlit.
+
+`DEEPSEEK_API_KEY` is optional. Add your own key to `.env` to enable DeepSeek query rewriting and generated answers. If port 8501 is already in use, run `HOST_PORT=8502 docker compose up --build` and open [http://localhost:8502](http://localhost:8502). The application still uses port 8501 inside the container.
 
 ### Local development
 
@@ -50,7 +51,7 @@ make test
 make run
 ```
 
-The first retrieval downloads `sentence-transformers/all-MiniLM-L6-v2` and `cross-encoder/ms-marco-MiniLM-L-6-v2`. Docker stores these models in a named volume so later starts can reuse them.
+Fast — BM25 is the default retrieval mode and works immediately without model downloads. Advanced — Hybrid + reranker combines BM25, MiniLM vector search, RRF, and a CrossEncoder. Its first use downloads `sentence-transformers/all-MiniLM-L6-v2` and `cross-encoder/ms-marco-MiniLM-L-6-v2`, which can take several minutes. Docker stores these models in a named volume so later starts can reuse them.
 
 | Command | Purpose |
 |---|---|
@@ -64,9 +65,10 @@ The first retrieval downloads `sentence-transformers/all-MiniLM-L6-v2` and `cros
 
 1. Start the application and open the **Chat Assistant** tab.
 2. Enter a Vietnamese or English question, or select a sample query.
-3. Read the English answer and expand **Retrieved evidence** to view filenames, chunk IDs, reranking scores, and source passages.
-4. Optionally submit 👍 or 👎 feedback.
-5. Open **Monitoring Dashboard** to view query volume, satisfaction, latency, token use, and reranking-score distribution.
+3. Use **Fast — BM25** for immediate local keyword retrieval, or **Advanced — Hybrid + reranker** for semantic retrieval after its first-run model download.
+4. Read the answer and expand **Retrieved evidence** to view filenames, chunk IDs, correctly labelled retrieval scores, and source passages. Without a DeepSeek key, the answer is a cited extractive fallback.
+5. Optionally submit 👍 or 👎 feedback.
+6. Open **Monitoring Dashboard** to view query volume, satisfaction, latency, token use, and retrieval-score distribution.
 
 ## Data ingestion
 
@@ -108,7 +110,7 @@ The database contains user questions and generated answers. A public deployment 
 
 | Variable | Default | Description |
 |---|---|---|
-| `DEEPSEEK_API_KEY` | empty | Enables DeepSeek query rewriting, answers, and judge evaluation. |
+| `DEEPSEEK_API_KEY` | empty | Optional. Enables DeepSeek query rewriting, generated answers, and judge evaluation; blank uses cited extracts. |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek's OpenAI-compatible API base URL. |
 | `DEEPSEEK_CHAT_MODEL` | `deepseek-chat` | Query rewriter and answer model. |
 | `DEEPSEEK_JUDGE_MODEL` | `deepseek-chat` | Model used for LLM-as-a-judge evaluation. |

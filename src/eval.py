@@ -112,7 +112,6 @@ def judge_answer(question: str, reference: str, answer: str) -> dict[str, int | 
                 ),
             },
         ],
-        temperature=0,
     )
     payload = (response.choices[0].message.content or "").strip()
     payload = payload.removeprefix("```json").removesuffix("```").strip()

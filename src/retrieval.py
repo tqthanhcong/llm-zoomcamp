@@ -20,6 +20,7 @@ DEFAULT_DB_PATH = Path("data/knowledge.duckdb")
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_TIMEOUT_SECONDS = 20.0
 
 
 def get_deepseek_client() -> OpenAI:
@@ -30,6 +31,8 @@ def get_deepseek_client() -> OpenAI:
     return OpenAI(
         api_key=api_key,
         base_url=os.getenv("DEEPSEEK_BASE_URL", DEEPSEEK_BASE_URL),
+        timeout=DEEPSEEK_TIMEOUT_SECONDS,
+        max_retries=1,
     )
 
 
@@ -112,24 +115,26 @@ class AdvancedRetriever:
         if not os.getenv("DEEPSEEK_API_KEY"):
             return clean_query
 
-        response = chat_completion(
-            get_deepseek_client(),
-            os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "Rewrite the user's Vietnamese or English question as one concise, "
-                        "explicit retrieval query. "
-                        "Preserve names, dates, rates, and policy terminology. "
-                        "Return only the rewritten query and do not answer it."
-                    ),
-                },
-                {"role": "user", "content": clean_query},
-            ],
-            temperature=0,
-        )
-        return (response.choices[0].message.content or "").strip() or clean_query
+        try:
+            response = chat_completion(
+                get_deepseek_client(),
+                os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Rewrite the user's Vietnamese or English question as one concise, "
+                            "explicit retrieval query. "
+                            "Preserve names, dates, rates, and policy terminology. "
+                            "Return only the rewritten query and do not answer it."
+                        ),
+                    },
+                    {"role": "user", "content": clean_query},
+                ],
+            )
+            return (response.choices[0].message.content or "").strip() or clean_query
+        except Exception:
+            return clean_query
 
     def bm25_search(self, query: str, limit: int = 10) -> list[tuple[str, float]]:
         scores = self._bm25.get_scores(tokenize(query))
@@ -211,7 +216,7 @@ class AdvancedRetriever:
         rewrite: bool = True,
         candidate_limit: int = 10,
         result_limit: int = 3,
-        method: Literal["bm25", "vector", "hybrid"] = "hybrid",
+        method: Literal["bm25", "vector", "hybrid"] = "bm25",
     ) -> tuple[str, list[RetrievedChunk]]:
         rewritten = self.rewrite_query(query) if rewrite else " ".join(query.split())
         if method == "bm25":
@@ -237,7 +242,7 @@ def answer_question(
     *,
     prompt_style: Literal["basic", "cot"] = "basic",
 ) -> tuple[str, int]:
-    """Generate an English, source-cited answer and return estimated token usage."""
+    """Generate an answer, falling back to cited extracts when generation is unavailable."""
     if not contexts:
         return "I could not find relevant evidence in the indexed documents.", 0
 
@@ -257,23 +262,30 @@ def answer_question(
             "Do not reveal private reasoning; provide a concise evidence-backed conclusion."
         )
 
-    if not os.getenv("DEEPSEEK_API_KEY"):
-        sources = ", ".join(f"[Source {i}]" for i in range(1, len(contexts) + 1))
-        fallback = (
-            "Retrieval succeeded, but generation requires DEEPSEEK_API_KEY. "
-            f"The most relevant evidence is available in {sources}."
+    def fallback(reason: str | None = None) -> tuple[str, int]:
+        notice = f"⚠️ {reason}\n\n" if reason else ""
+        extracts = "\n\n".join(
+            f"[Source {index}: {chunk.filename}#{chunk.chunk_id}] {chunk.content}"
+            for index, chunk in enumerate(contexts, start=1)
         )
-        return fallback, max(1, len((query + context_text).split()))
+        return notice + "Most relevant retrieved evidence:\n\n" + extracts, max(
+            1, len((query + context_text).split())
+        )
 
-    response = chat_completion(
-        get_deepseek_client(),
-        os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
-        [
-            {"role": "system", "content": system},
-            {"role": "user", "content": f"Question: {query}\n\nEvidence:\n{context_text}"},
-        ],
-        temperature=0,
-    )
-    usage = response.usage
-    total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
-    return (response.choices[0].message.content or "").strip(), total_tokens
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        return fallback("DeepSeek generation is disabled; showing cited extracts.")
+
+    try:
+        response = chat_completion(
+            get_deepseek_client(),
+            os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat"),
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"Question: {query}\n\nEvidence:\n{context_text}"},
+            ],
+        )
+        usage = response.usage
+        total_tokens = int(getattr(usage, "total_tokens", 0) or 0)
+        return (response.choices[0].message.content or "").strip(), total_tokens
+    except Exception:
+        return fallback("DeepSeek generation failed; showing cited extracts instead.")
