@@ -10,9 +10,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from statistics import mean
 
-from openai import OpenAI
-
-from src.retrieval import AdvancedRetriever, RetrievedChunk, answer_question
+from src.retrieval import (
+    AdvancedRetriever,
+    RetrievedChunk,
+    answer_question,
+    chat_completion,
+    get_deepseek_client,
+)
 
 DEFAULT_GROUND_TRUTH = Path("data/ground_truth.csv")
 
@@ -85,11 +89,12 @@ def evaluate_retrieval(
 
 def judge_answer(question: str, reference: str, answer: str) -> dict[str, int | str]:
     """Score relevance and faithfulness from 1-5 using a structured LLM judge."""
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY is required for LLM-as-a-Judge evaluation")
-    response = OpenAI().responses.create(
-        model=os.getenv("OPENAI_JUDGE_MODEL", os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")),
-        input=[
+    if not os.getenv("DEEPSEEK_API_KEY"):
+        raise RuntimeError("DEEPSEEK_API_KEY is required for LLM-as-a-Judge evaluation")
+    response = chat_completion(
+        get_deepseek_client(),
+        os.getenv("DEEPSEEK_JUDGE_MODEL", os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat")),
+        [
             {
                 "role": "system",
                 "content": (
@@ -109,7 +114,8 @@ def judge_answer(question: str, reference: str, answer: str) -> dict[str, int | 
         ],
         temperature=0,
     )
-    payload = response.output_text.strip().removeprefix("```json").removesuffix("```").strip()
+    payload = (response.choices[0].message.content or "").strip()
+    payload = payload.removeprefix("```json").removesuffix("```").strip()
     result = json.loads(payload)
     for key in ("relevance", "faithfulness"):
         result[key] = max(1, min(5, int(result[key])))

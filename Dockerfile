@@ -13,7 +13,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --no-dev
 
 COPY . .
