@@ -1,0 +1,17 @@
+services:
+  rag-assistant:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      HF_HOME: /app/.cache/huggingface
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-4o-mini}
+      OPENAI_JUDGE_MODEL: ${OPENAI_JUDGE_MODEL:-gpt-4o-mini}
+    volumes:
+      - ./data:/app/data
+      - huggingface-cache:/app/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  huggingface-cache:
